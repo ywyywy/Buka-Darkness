@@ -1,6 +1,7 @@
 package org.noear.sited;
 
 import android.app.Application;
+import android.util.Log;
 
 import com.eclipsesource.v8.JavaVoidCallback;
 import com.eclipsesource.v8.Releasable;
@@ -32,6 +33,7 @@ class JsEngine {
                 }
             }
         };
+
         engine.registerJavaMethod(callback, "print");
     }
 
@@ -53,7 +55,7 @@ class JsEngine {
     public String callJs(String fun, String... args) {
         V8Array params = new V8Array(engine);
         for (String p : args) {
-            params.push(p.replaceAll("[^\\u0000-\\uFFFF]", ""));
+            params.push(p);
         }
 
 

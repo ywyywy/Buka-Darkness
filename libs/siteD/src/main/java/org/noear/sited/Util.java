@@ -1,6 +1,7 @@
 package org.noear.sited;
 
 import android.content.Context;
+import android.net.Uri;
 import android.os.Handler;
 import android.text.TextUtils;
 import android.util.Log;
@@ -22,12 +23,16 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import cz.msebera.android.httpclient.Header;
+import cz.msebera.android.httpclient.HttpResponse;
+import cz.msebera.android.httpclient.impl.client.DefaultRedirectHandler;
+import cz.msebera.android.httpclient.protocol.HttpContext;
 
 
 /**
  * Created by yuety on 15/8/21.
  */
 class Util {
+    protected static final String NEXT_CALL = "CALL::";
     protected static final String defUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.10240";
 
     protected static __ICache cache = null;
@@ -46,27 +51,12 @@ class Util {
             return null;
     }
 
-    protected static String getElementVal(Element n, String tag) {
-        NodeList temp = n.getElementsByTagName(tag);
-        if (temp.getLength() > 0)
-            return temp.item(0).getTextContent();
-        else
-            return null;
-    }
-
     protected static Element getXmlroot(String xml) throws Exception {
         StringReader sr = new StringReader(xml);
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         DocumentBuilder dombuild = factory.newDocumentBuilder();
 
         return dombuild.parse(new InputSource(sr)).getDocumentElement();
-    }
-
-    protected static int parseInt(String str) {
-        if (TextUtils.isEmpty(str))
-            return 0;
-        else
-            return Integer.parseInt(str);
     }
 
     //
@@ -81,79 +71,74 @@ class Util {
         }
     }
 
-    protected static void http(SdSource source, boolean isUpdate, String url, Map<String, String> params, int tag, SdNode config, HttpCallback callback) {
-        __CacheBlock block = null;
+    protected static void http(SdSource source, boolean isUpdate, HttpMessage msg) {
+
+        log(source, "Util.http", msg.url);
+
         String cacheKey2 = null;
-        if (params == null)
-            cacheKey2 = url;
+        String args = "";
+        if (msg.form == null)
+            cacheKey2 = msg.url;
         else {
             StringBuilder sb = new StringBuilder();
-            sb.append(url);
-            for (String key : params.keySet()) {
-                sb.append(key).append("=").append(params.get(key)).append(";");
+            sb.append(msg.url);
+            for (String key : msg.form.keySet()) {
+                sb.append(key).append("=").append(msg.form.get(key)).append(";");
             }
             cacheKey2 = sb.toString();
+            args = cacheKey2;
         }
         final String cacheKey = cacheKey2;
 
-        if (isUpdate == false && config.cache > 0) {
-            block = cache.get(cacheKey);
-        }
 
-        if (block != null) {
-            if (config.cache == 1 || block.seconds() <= config.cache) {
+        __CacheBlock block = cache.get(cacheKey);
+
+        if (isUpdate == false && msg.config.cache > 0) {
+            if (block != null && block.isOuttime(msg.config) == false) {
                 final __CacheBlock block1 = block;
 
                 new Handler().postDelayed(() -> {
-                    Log.v("Util.incache.url", url);
-                    callback.run(1, tag, block1.value);
+                    log(source, "Util.incache.url", msg.url);
+                    msg.callback.run(1, msg, block1.value, null);
                 }, 100);
                 return;
             }
         }
 
-        doHttp(source, url, params, tag, config, block, (code, tag2, data) -> {
-            if (code == 1 && config.cache > 0) {
+        doHttp(source, msg, block, (code, msg2, data, url302) -> {
+            if (code == 1) {
                 cache.save(cacheKey, data);
             }
 
-            callback.run(code, tag2, data);
+            msg.callback.run(code, msg2, data, url302);
         });
+
+        source.DoTraceUrl(msg.url, args, msg.config);
     }
 
-    private static void doHttp(SdSource source, String url, Map<String, String> params, int tag, SdNode config, __CacheBlock cache, HttpCallback callback) {
-        AsyncHttpClient client = new AsyncHttpClient();
-        client.setUserAgent(source.ua());
-        client.setURLEncodingEnabled(url.indexOf(" ") > 0);
+    private static void doHttp(SdSource source, HttpMessage msg, __CacheBlock cache, HttpCallback callback) {
+        AsyncHttpClient client = new AsyncHttpClient(true, 80, 443);
 
-        if (config.isInCookie()) {
-            String cookies = config.cookies(url);
-            if (cookies != null) {
-                client.addHeader("Cookie", cookies);
-            }
+        client.setUserAgent(msg.ua);
+        client.setURLEncodingEnabled(msg.url.indexOf(" ") > 0);
+
+        for (String key : msg.header.keySet()){
+            client.addHeader(key, msg.header.get(key));
         }
 
-        if (config.isInReferer()) {
-            client.addHeader("Referer", source.buildReferer(config, url));
-        }
+        __AsyncTag httpTag = new __AsyncTag();
 
-        if (TextUtils.isEmpty(config.header) == false) {
-            for (String kv : config.header.split(";")) {
-                String[] kv2 = kv.split("=");
-                if (kv2.length == 2) {
-                    client.addHeader(kv2[0], kv2[1]);
-                }
-            }
-        }
-
-        TextHttpResponseHandler responseHandler = new TextHttpResponseHandler(config.encode()) {
+        TextHttpResponseHandler responseHandler = new TextHttpResponseHandler(msg.encode) {
 
             @Override
             public void onFailure(int statusCode, cz.msebera.android.httpclient.Header[] headers, String s, Throwable throwable) {
-                if (cache == null)
-                    callback.run(-2, tag, null);
+
+                Util.log(source,"http.onFailure",throwable.getMessage(),throwable);
+
+                if (cache == null || cache.value == null)
+                    callback.run(-2, msg, null, null);
                 else
-                    callback.run(1, tag, cache.value);
+                    callback.run(1, msg, cache.value, httpTag.str0);
             }
 
             @Override
@@ -165,22 +150,45 @@ class Util {
                     }
                 }
 
-                callback.run(1, tag, s);
+                callback.run(1, msg, s,httpTag.str0);
             }
         };
 
 
+        client.setEnableRedirects(true);
+        client.setRedirectHandler(new DefaultRedirectHandler(){
+            @Override
+            public boolean isRedirectRequested(HttpResponse response, HttpContext context) {
+                int statusCode = response.getStatusLine().getStatusCode();
+
+                if (statusCode == 302 || statusCode == 301) {
+                    httpTag.str0 = response.getFirstHeader("Location").getValue();
+
+                    if (httpTag.str0.startsWith("http") == false) {
+                        Uri uri = Uri.parse(msg.url);
+                        httpTag.str0 = uri.getScheme() + "://" + uri.getHost() + httpTag.str0;
+                    }
+
+                    Log.v("orgurl", msg.url);
+                    Log.v("302url", httpTag.str0);
+                }
+
+                return super.isRedirectRequested(response, context);
+            }
+        });
+
+
         try {
-            int idx = url.indexOf('#'); //去除hash，即#.*
+            int idx = msg.url.indexOf('#'); //去除hash，即#.*
             String url2 = null;
             if (idx > 0)
-                url2 = url.substring(0, idx);
+                url2 = msg.url.substring(0, idx);
             else
-                url2 = url;
+                url2 = msg.url;
 
-            if ("post".equals(config.method)) {
-                RequestParams postData = new RequestParams(params);
-                postData.setContentEncoding(config.encode());
+            if ("post".equals(msg.method)) {
+                RequestParams postData = new RequestParams(msg.form);
+                postData.setContentEncoding(msg.encode);
 
                 client.post(url2, postData, responseHandler);
             } else {
@@ -188,9 +196,9 @@ class Util {
             }
         } catch (Exception ex) {
             if (cache == null)
-                callback.run(-2, tag, null);
+                callback.run(-2, msg, null, null);
             else
-                callback.run(1, tag, cache.value);
+                callback.run(1, msg, cache.value, null);
         }
     }
 
